@@ -1,349 +1,309 @@
 #include <stdio.h>
 #include <string.h>
-#include <stdlib.h>	  // exit()
-#include <unistd.h>	  // fork(), getpid(), exec()
+#include <stdlib.h>   // exit()
+#include <unistd.h>   // fork(), getpid(), exec()
 #include <sys/wait.h> // wait()
-#include <signal.h>	  // signal()
-#include <fcntl.h>	  // close(), open()
+#include <signal.h>   // signal()
+#include <fcntl.h>    // close(), open()
 
-#define PATHLENGTH 10000 // Max size of user command
-#define MAXSIZE 1000	 // Max size of command after applying delimiter
+#define BUFSIZE 100  // Define buffer size for input
+#define CWD_SIZE 100 // Define buffer size for current working directory
+#define PATH_MAX 100 // Define maximum path length
 
-// GLOBALS
-int cur_size;		// size of commands string returned from parseInput function
-pid_t forkChildPID; // Child id used in signal Handling
-
-// This function terminated the use of Ctrl+C and Ctrl+Z in parent process and uses them in Child process
-void sighandler(int sig_num)
+void changeDirectory(char **tokens)
 {
-	if (forkChildPID != 0)
-	{
-		kill(forkChildPID, SIGKILL);
-	}
+    if (tokens[1] != NULL)
+    {
+        // Change directory using chdir() system call
+        if (chdir(tokens[1]) != 0)
+        {
+            // Print error message if directory change fails
+            printf("Shell: Incorrect command\n");
+        }
+    }
 }
 
-/* This function will parse the input string into multiple commands or a single command with arguments depending on the delimiter 
-(&&, ##, >, or spaces). */
-int parseInput(char *original, char **commands)
+char **parseInput(char *input)
 {
-	int i, ret_val = 0;
-	if (strstr(original, "&&") != NULL)
-	{
-		for (i = 0; i < MAXSIZE; i++)
-		{
-			commands[i] = strsep(&original, "&&");
+    int pos = 0;
+    int buf_size = BUFSIZE;
 
-			if (commands[i] == NULL)
-				break;
-			if (strlen(commands[i]) == 0)
-				i--;
-		}
+    // Allocate memory for array of tokens
+    char **tokens = malloc(buf_size * sizeof(char *));
+    char *tok;
+    while ((tok = strsep(&input, " ")) != NULL)
+    {
+        if (strlen(tok) == 0)
+        {
+            continue;
+        }
+        tokens[pos++] = tok; // Store token in array
+    }
 
-		ret_val = 1;
-		cur_size = i;
-	}
-	else if (strstr(original, "##") != NULL)
-	{
-		for (i = 0; i < MAXSIZE; i++)
-		{
-			commands[i] = strsep(&original, "##");
-
-			if (commands[i] == NULL)
-				break;
-			if (strlen(commands[i]) == 0)
-				i--;
-		}
-
-		ret_val = 2;
-		cur_size = i;
-	}
-	else if (strstr(original, ">") != NULL)
-	{
-		for (i = 0; i < MAXSIZE; i++)
-		{
-			commands[i] = strsep(&original, ">");
-
-			if (commands[i] == NULL)
-				break;
-			if (strlen(commands[i]) == 0)
-				i--;
-		}
-
-		ret_val = 3;
-		cur_size = i;
-	}
-	else
-	{
-		for (i = 0; i < MAXSIZE; i++)
-		{
-			commands[i] = strsep(&original, " ");
-
-			if (commands[i] == NULL)
-				break;
-			if (strlen(commands[i]) == 0)
-				i--;
-		}
-
-		ret_val = 4;
-	}
-
-	if (i == 0)
-		return 0;
-
-	return ret_val;
+    tokens[pos] = NULL; // Mark end of array with NULL
+    return tokens;      // Return array of tokens
 }
 
-// This function will fork a new process to execute a command except cd and exit command
-void executeCommand(char **str)
+void executeCommand(char **tokens)
 {
-	if (strcmp(str[0], "exit") == 0)
-	{
-		printf("Exiting shell...\n");
-		exit(0);
-	}
-	else if (strcmp(str[0], "cd") == 0)
-	{
-		int result;
+    // This function will fork a new process to execute a command
+    if (strcmp(tokens[0], "cd") == 0)
+    {
+        // Handle change directory command
+        changeDirectory(tokens);
+    }
+    else
+    {
+        int rc = fork(); // Fork a new process
 
-		if (str[1] == NULL)
-			result = chdir(getenv("HOME"));
-		else
-			result = chdir(str[1]);
+        if (rc < 0)
+        {
+            // Forking failed
+            exit(1);
+        }
+        else if (rc == 0)
+        {
+            // Child process
 
-		if (result != 0 && strcmp(str[1], ".") != 0)
-			printf("Shell: Incorrect command\n");
-	}
-	else
-	{
-		forkChildPID = fork();
+            // Restore default signal handling for Ctrl+C and Ctrl+Z
+            signal(SIGINT, SIG_DFL);
+            signal(SIGTSTP, SIG_DFL);
 
-		if (forkChildPID < 0)
-		{
-			printf("Shell: Incorrect command\n"); //fork unsuccessful
-			exit(0);
-		}
-		else if (forkChildPID == 0)
-		{
-			execvp(str[0], str);
-
-			// If execvp fails exit child process
-			printf("Shell: Incorrect command\n");
-			exit(0);
-		}
-		else
-		{
-			wait(NULL);
-		}
-	}
+            // Execute command in child process
+            if (execvp(tokens[0], tokens) == -1)
+            {
+                // Print error message if command execution fails
+                printf("Shell: Incorrect command\n");
+                exit(1);
+            }
+        }
+        else
+        {
+            // Parent process
+            int rc_wait = wait(NULL); // Wait for child process to finish
+        }
+    }
 }
 
-// This function will run multiple commands in parallel
-void executeParallelCommands(char **str)
+void executeSequentialCommands(char **tokens)
 {
-	int total_waits = 0;
+    // This function will run multiple commands in sequence
+    int start = 0;
+    int i = 0;
+    while (tokens[i])
+    {
+        while (tokens[i] && strcmp(tokens[i], "##") != 0)
+        {
+            i++;
+        }
 
-	for (int k = 0; k < cur_size; k++)
-	{
-		char *commands[MAXSIZE];
-		char *original = strdup(str[k]);
-		int i;
-
-		for (i = 0; i < MAXSIZE; i++)
-		{
-			commands[i] = strsep(&original, " ");
-			if (commands[i] == NULL)
-				break;
-			if (strlen(commands[i]) == 0)
-				i--;
-		}
-
-		if (i == 0)
-			continue;
-
-		total_waits++;
-
-		// When user uses exit command.
-		if (strcmp(commands[0], "exit") == 0)
-		{
-			printf("Exiting shell...\n");
-			exit(0);
-		}
-		else if (strcmp(commands[0], "cd") == 0)
-		{
-			int result;
-
-			if (commands[1] == NULL)
-				result = chdir(getenv("HOME"));
-			else
-				result = chdir(commands[1]);
-
-			if (result != 0 && strcmp(commands[1], ".") != 0)
-				printf("Shell: Incorrect command\n");
-		}
-		else
-		{
-			forkChildPID = fork();
-
-			if (forkChildPID < 0)
-			{
-				printf("Shell: Incorrect command\n");
-				exit(0);
-			}
-			else if (forkChildPID == 0)
-			{
-				execvp(commands[0], commands);
-
-				printf("Shell: Incorrect command\n");
-				exit(0);
-			}
-		}
-	}
-
-	for (int i = 0; i < total_waits; i++)
-		wait(NULL); // waiting for every process to terminated; wait will return random child id after there termination
+        tokens[i] = NULL;
+        executeCommand(&tokens[start]); // Execute command
+        i++;
+        start = i;
+    }
 }
 
-// This function will run multiple commands sequentially
-void executeSequentialCommands(char **str)
+void executeParallelCommands(char **tokens)
 {
-	for (int k = 0; k < cur_size; k++)
-	{
-		char *commands[MAXSIZE];
-		char *original = strdup(str[k]);
-		int i;
+    // This function will run multiple commands in parallel
+    int r;
+    int i = 0;
+    int start = 0;
+    int process_count = 0;
 
-		for (i = 0; i < MAXSIZE; i++)
-		{
-			commands[i] = strsep(&original, " ");
+    while (tokens[i])
+    {
+        while (tokens[i] && strcmp(tokens[i], "&&") != 0)
+        {
+            i++;
+        }
 
-			if (commands[i] == NULL)
-				break;
-			if (strlen(commands[i]) == 0)
-				i--;
-		}
+        process_count++;
+        tokens[i] = NULL;
+        if (strcmp(tokens[start], "cd") == 0)
+        {
+            // Handle change directory command
+            changeDirectory(&tokens[start]);
+        }
+        else
+        {
+            r = fork(); // Fork a new process
+            if (r < 0)
+            {
+                // Forking failed
+                exit(1);
+            }
+            else if (r == 0)
+            {
+                // Child process
 
-		if (i == 0)
-		{
-			continue;
-		}
+                // Restore default signal handling for Ctrl+C and Ctrl+Z
+                signal(SIGINT, SIG_DFL);
+                signal(SIGTSTP, SIG_DFL);
 
-		executeCommand(commands);
-	}
+                // Execute command in child process
+                if (execvp(tokens[start], &tokens[start]) == -1)
+                {
+                    // Print error message if command execution fails
+                    printf("Shell: Incorrect command\n");
+                    process_count--;
+                    exit(0);
+                }
+            }
+        }
+        i++;
+        start = i;
+    }
+
+    // Parent process
+    while (process_count)
+    {
+        int ret = wait(NULL); // Wait for child processes to finish
+        process_count--;
+    }
 }
 
-// This function will run a single command with output redirected to an output file specificed by user
-void executeCommandRedirection(char **str)
+void executeCommandRedirection(char **tokens)
 {
-	int i = 0;
-	char *commands[MAXSIZE];
-	for (int k = 0; k < cur_size; k++)
-	{
-		char *original = strdup(str[k]);
+    // This function will run a single command with output redirected to an output file specified by user
+    int total_tok = 0;
 
-		while (i < MAXSIZE)
-		{
-			commands[i] = strsep(&original, " ");
-			if (commands[i] == NULL)
-				break;
-			if (strlen(commands[i]) != 0)
-				i++;
-		}
-	}
+    // Count total number of tokens
+    for (int i = 0; tokens[i] != NULL; i++)
+    {
+        total_tok++;
+    }
 
-	int n = i;
+    int r = fork(); // Fork a new process
 
-	forkChildPID = fork();
+    if (r < 0)
+    {
+        // Forking failed
+        exit(1);
+    }
+    else if (r == 0)
+    {
+        // Child process
 
-	if (forkChildPID < 0)
-	{
-		printf("Shell: Incorrect command\n");
-		exit(0);
-	}
-	else if (forkChildPID == 0)
-	{
-		close(STDOUT_FILENO); // Redirecting STDOUT
-		open(commands[n - 1], O_CREAT | O_RDWR | O_APPEND);
+        // Restore default signal handling for Ctrl+C and Ctrl+Z
+        signal(SIGINT, SIG_DFL);
+        signal(SIGTSTP, SIG_DFL);
 
-		commands[n - 1] = NULL; // making name null as it is not required
-		execvp(commands[0], commands);
+        // Create or empty file
+        fclose(fopen(tokens[total_tok - 1], "w"));
 
-		printf("Shell: Incorrect command\n");
-		exit(0);
-	}
-	else
-	{
-		wait(NULL);
-	}
+        // Redirect STDOUT to output file
+        close(STDOUT_FILENO);
+        int f = open(tokens[total_tok - 1], O_CREAT | O_WRONLY | O_APPEND);
+
+        tokens[total_tok - 1] = tokens[total_tok - 2] = NULL;
+
+        // Execute command in child process
+        if (execvp(tokens[0], tokens) == -1)
+        {
+            // Print error message if command execution fails
+            printf("Shell: Incorrect command\n");
+            exit(1);
+        }
+
+        // Close file descriptor
+        fflush(stdout);
+        close(f);
+    }
+    else
+    {
+        // Parent process
+        int rc_wait = wait(NULL); // Wait for child process to finish
+    }
+}
+
+char cwd[PATH_MAX]; // stored the location of current directory
+
+void sigHandler(int sig)
+{
+    printf("\n");
+    printf("%s$", cwd); // Print current working directory
+    fflush(stdout);
+    return;
 }
 
 int main()
 {
-	// Ignore SIGINT signal (CTRL+C) and SIGTSTP signal (CTRL+Z) in parent
-	signal(SIGINT, sighandler);
-	signal(SIGTSTP, sighandler);
 
-	// Initial declarations
-	char currentWorkingDirectory[PATHLENGTH];
-	char *check = NULL;
+    // Initial declarations
+    signal(SIGTSTP, &sigHandler); // Set signal handler for Ctrl+Z
+    signal(SIGINT, &sigHandler);  // Set signal handler for Ctrl+C
 
-	char *input = NULL; // string recieved from user
-	char *retval = NULL;
-	size_t size = 0;
+    while (1) // This loop will keep your shell running until user exits.
+    {
+        // Print the prompt in format - currentWorkingDirectory$
+        if (getcwd(cwd, sizeof(cwd)) != NULL)
+        {
+            printf("%s$", cwd); // Print current working directory
+        }
 
-	char *original;
-	char *commands[MAXSIZE];
+        // Accept input with 'getline()'
+        char *input = NULL;
+        size_t size = 0;
 
-	int flag;
-	while (1) // This loop will keep your shell running until user exits.
-	{
-		// getcwd() return the path of current working directory defined in unistd.h library
-		check = getcwd(currentWorkingDirectory, sizeof(currentWorkingDirectory)); 
-		
-		if (check != NULL)
-		{
-			printf("%s$",currentWorkingDirectory); // Print the prompt in format - currentWorkingDirectory$
-		}
-		else
-		{
-			printf("Shell: Incorrect command\n"); // Too long path cannot be displayed...
-		}
+        int byte_read = getline(&input, &size, stdin); // Read input
+        int len = strlen(input);
+        input[len - 1] = '\0'; // Replace newline character with null terminator
 
-		// accept input with 'getline()'
-		getline(&input, &size, stdin); // input string contain delimiter also
-		input = strsep(&input, "\n");  // Remove delimiter using strsep in
+        // Parse input with 'strsep()' for different symbols (&&, ##, >) and for spaces.
+        char **args = parseInput(input); // Parse input into tokens
 
-		if (strlen(input) == 0)
-		{
-			continue;
-		}
+        if (strcmp(args[0], "exit") == 0)
+        {
+            // When user uses exit command.
+            printf("Exiting shell...\n");
+            break; // Exit the while loop and terminate the shell
+        }
 
-		original = strdup(input); // copies in heap and give me the string
+        int c = 0;
+        for (int i = 0; args[i] != NULL; i++)
+        {
 
-		// Parse input with 'strsep()' for different symbols (&&, ##, >) and for spaces.
-		flag = parseInput(original, commands);
-
-		if (flag == 0) // Handling case of spaces
-		{
-			continue;
-		}
-
-		if (flag == 1)
-		{
-			executeParallelCommands(commands); // This function is invoked when user wants to run multiple commands in parallel (commands separated by &&)
-		}
-		else if (flag == 2)
-		{
-			executeSequentialCommands(commands); // This function is invoked when user wants to run multiple commands sequentially (commands separated by ##)
-		}
-		else if (flag == 3)
-		{
-			executeCommandRedirection(commands); // This function is invoked when user wants redirect output of a single command to and output file specificed by user
-		}
-		else
-		{
-			executeCommand(commands); // This function is invoked when user wants to run a single commands
-		}
-	}
-
-	return 0;
+            if (strcmp(args[i], "&&") == 0)
+            {
+                // Parallel execution
+                c = 1;
+                break;
+            }
+            else if (strcmp(args[i], "##") == 0)
+            {
+                // Sequential execution
+                c = 2;
+                break;
+            }
+            else if (strcmp(args[i], ">") == 0)
+            {
+                // Redirection execution
+                c = 3;
+                break;
+            }
+        }
+        if (c == 1)
+        {
+            // This function is invoked when user wants to run multiple commands in parallel (commands separated by &&)
+            executeParallelCommands(args);
+        }
+        else if (c == 2)
+        {
+            // This function is invoked when user wants to run multiple commands sequentially (commands separated by ##)
+            executeSequentialCommands(args);
+        }
+        else if (c == 3)
+        {
+            // This function is invoked when user wants redirect output of a single command to an output file specified by user
+            executeCommandRedirection(args);
+        }
+        else
+        {
+            // Simple command
+            executeCommand(args);
+        }
+    }
+    return 0;
 }
